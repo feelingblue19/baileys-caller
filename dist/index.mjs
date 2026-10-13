@@ -84,18 +84,17 @@ export class ActiveCall extends EventEmitter {
         }
     }
     get state() { return this.#state; }
-    end = () => {
+    end = (reason = "hangup") => {
         if (this.#ended)
             return;
-        this.#ended = true;
-        if (this.#endTimer) {
-            clearTimeout(this.#endTimer);
-            this.#endTimer = null;
-        }
         try {
             this.engine.endCall(0, true);
         }
         catch { }
+        // `_forceEnd` is what clears the end timer, emits `ended` and resolves
+        // `waitForEnd()`; setting `#ended` first would make it a no-op and wedge
+        // every `waitForEnd()` caller.
+        this._forceEnd(reason);
     };
     mute = (muted) => {
         try {
@@ -139,6 +138,7 @@ export class VoipClient {
     #sock = null;
     #activeCall = null;
     #baileys = null;
+    #open = false;
     // Capture state populated when WASM negotiates audio params
     #capturePtr = 0;
     #captureChunkBytes = 0;
@@ -192,20 +192,25 @@ export class VoipClient {
                 });
                 this.#sock.ev.on("connection.update", (update) => {
                     if (update.qr) {
-                        void import("qrcode-terminal")
-                            .then((qrt) => (qrt.default ?? qrt).generate(update.qr, { small: true }))
-                            .catch(() => {
-                            console.log("Scan this QR code in WhatsApp > Linked Devices:");
-                            console.log(update.qr);
-                        });
+                        if (this.#config.onQr)
+                            this.#config.onQr(update.qr);
+                        else
+                            void import("qrcode-terminal")
+                                .then((qrt) => (qrt.default ?? qrt).generate(update.qr, { small: true }))
+                                .catch(() => {
+                                console.log("Scan this QR code in WhatsApp > Linked Devices:");
+                                console.log(update.qr);
+                            });
                     }
                     if (update.connection === "open") {
+                        this.#open = true;
                         opened = true;
                         process.removeAllListeners("uncaughtException");
                         resolveOpen();
                         return;
                     }
                     if (update.connection === "close" && !opened) {
+                        this.#open = false;
                         const statusCode = update.lastDisconnect?.error?.output?.statusCode;
                         const shouldReconnect = statusCode === 515 || statusCode === DisconnectReason?.restartRequired;
                         if (shouldReconnect && retries < maxRetries) {
@@ -298,10 +303,27 @@ export class VoipClient {
             isFromDialer: false,
             extraData: tcToken,
         });
+        // A finished call must release the slot: `#activeCall` is otherwise never
+        // cleared, so every later `call()` throws "A call is already active."
+        call.once("ended", () => {
+            if (this.#activeCall === call)
+                this.#activeCall = null;
+        });
         return call;
     };
+    /**
+     * Push one 16 kHz mono f32 frame of the local (caller) side into the WhatsApp
+     * uplink. Dropped until the WASM starts asking for capture, i.e. until the
+     * callee has answered (`AudioFeeder` is created on capture start).
+     */
+    write = (pcm) => {
+        this.#feeder?.write(pcm);
+    };
+    /** True once the socket is open — a populated `authDir` opens without a QR scan. */
+    isOpen = () => this.#open;
     /** Tear down the WhatsApp socket and release resources. */
     disconnect = () => {
+        this.#open = false;
         this.#activeCall?._forceEnd("disconnect");
         this.#activeCall = null;
         this.#relay?.closeAll();

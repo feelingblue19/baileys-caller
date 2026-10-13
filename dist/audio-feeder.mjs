@@ -22,6 +22,10 @@ export class AudioFeeder {
     #emitTimer = null;
     #nextEmitAtMs = 0;
     #warmupUntilMs = 0;
+    /** `source === "live"`: PCM arrives through `write()`, no ffmpeg is spawned. */
+    #live = false;
+    /** Undersized tail of a live frame, carried into the next `write()`. */
+    #pendingF32 = new Float32Array(0);
     droppedChunks = 0;
     underflowChunks = 0;
     bytesProduced = 0;
@@ -33,12 +37,45 @@ export class AudioFeeder {
         this.onChunk = onChunk;
         this.source = source;
     }
+    /**
+     * Push live PCM (only meaningful with `source === "live"`). Frames are
+     * re-chunked to the metering size, so the uplink is fed at the same cadence
+     * and in the same frame size as an ffmpeg source would feed it.
+     */
+    write = (pcm) => {
+        const chunkSamples = this.framesPerChunk * this.channels;
+        const merged = new Float32Array(this.#pendingF32.length + pcm.length);
+        merged.set(this.#pendingF32);
+        merged.set(pcm, this.#pendingF32.length);
+        let offset = 0;
+        while (merged.length - offset >= chunkSamples) {
+            if (this.#queue.length >= MAX_QUEUED_CHUNKS) {
+                // The uplink is not draining (capture stalled); drop the backlog rather
+                // than grow without bound. Live audio is worthless once it is late.
+                this.droppedChunks += 1;
+                offset = merged.length;
+                break;
+            }
+            this.#queue.push(merged.slice(offset, offset + chunkSamples));
+            offset += chunkSamples;
+        }
+        this.#pendingF32 = merged.slice(offset);
+    };
     start = () => {
-        if (this.#proc)
+        if (this.#proc || this.#live)
             return;
         const chunkSamples = this.framesPerChunk * this.channels;
         const chunkBytes = chunkSamples * Float32Array.BYTES_PER_ELEMENT;
         const chunkIntervalMs = (this.framesPerChunk / this.sampleRate) * 1000;
+        // Live source: nothing to decode, so skip ffmpeg entirely and let the caller
+        // push frames with `write()`; only the metering loop runs.
+        if (this.source === "live") {
+            this.#live = true;
+            this.#nextEmitAtMs = 0;
+            this.#warmupUntilMs = 0;
+            this.#scheduleNext(chunkSamples, chunkIntervalMs);
+            return;
+        }
         const inputArgs = this.#resolveInputArgs();
         this.#proc = spawn("ffmpeg", [
             "-hide_banner",
@@ -83,9 +120,11 @@ export class AudioFeeder {
             clearTimeout(this.#emitTimer);
             this.#emitTimer = null;
         }
+        this.#live = false;
         this.#proc?.kill("SIGTERM");
         this.#proc = null;
         this.#pending = Buffer.alloc(0);
+        this.#pendingF32 = new Float32Array(0);
         this.#queue = [];
         this.#warmupUntilMs = 0;
     };
@@ -99,7 +138,8 @@ export class AudioFeeder {
         return ["-i", this.source];
     };
     #scheduleNext = (chunkSamples, chunkIntervalMs) => {
-        if (!this.#proc)
+        // The live source has no child process; the metering loop is the whole pump.
+        if (!this.#proc && !this.#live)
             return;
         const now = Date.now();
         if (this.#nextEmitAtMs === 0)

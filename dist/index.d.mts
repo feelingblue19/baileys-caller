@@ -24,7 +24,7 @@ export declare class ActiveCall extends EventEmitter {
     _audioSource: string;
     constructor(callId: string, engine: WasmEngine, durationMs: number);
     get state(): CallState;
-    end: () => void;
+    end: (reason?: string) => void;
     mute: (muted: boolean) => void;
     waitForEnd: () => Promise<string>;
     /** @internal — called by VoipClient on WASM call-state change */
@@ -45,6 +45,14 @@ export declare class VoipClient {
         audioSource?: string;
         durationMs?: number;
     }) => Promise<ActiveCall>;
+    /**
+     * Push one 16 kHz mono f32 frame of the local (caller) side into the WhatsApp
+     * uplink. Dropped until the WASM starts asking for capture, i.e. until the
+     * callee has answered (`AudioFeeder` is created on capture start).
+     */
+    write: (pcm: Float32Array) => void;
+    /** True once the socket is open — a populated `authDir` opens without a QR scan. */
+    isOpen: () => boolean;
     /** Tear down the WhatsApp socket and release resources. */
     disconnect: () => void;
 }
