@@ -69,6 +69,13 @@ export declare class VoipClient {
     write: (pcm: Float32Array) => void;
     /** True once the socket is open — a populated `authDir` opens without a QR scan. */
     isOpen: () => boolean;
+    /**
+     * Why the socket is down after having been open, or null while it is open (or was never opened):
+     * `"reconnecting"` while it is being reopened, or the reason it was given up on — `"logged_out"`, `"replaced"`,
+     * `"forbidden"`, `"bad_session"`, `"multidevice_mismatch"`. A given-up socket stays down until `connect()` runs
+     * again in a new client (in practice: the service restarts, or the worker is re-linked).
+     */
+    disconnectReason: () => string | null;
     /** Tear down the WhatsApp socket and release resources. */
     disconnect: () => void;
 }
