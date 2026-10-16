@@ -33,6 +33,8 @@ export declare class ActiveCall extends EventEmitter {
      * @internal — the callee's side ended a call that was never answered. WhatsApp tells us with a `reject` (declined)
      * or a `terminate` (`reason="timeout"` when it rang out) stanza, and the engine does not always turn either into a
      * state change, so without this the call would ring until the caller's own timeout. An answered call is left to the engine.
+     * Ends through `end()`, not `_forceEnd()`: the engine must leave the call too, or it ignores the next `startCall` and
+     * that call never rings.
      */
     _peerEnded: (tag: string, reason?: string) => void;
     /** @internal — engine event 11: the callee declined. */
