@@ -114,6 +114,20 @@ export class ActiveCall extends EventEmitter {
             this._forceEnd("ended");
         }
     };
+    /**
+     * @internal — the callee's side ended a call that was never answered. WhatsApp tells us with a `reject` (declined)
+     * or a `terminate` (`reason="timeout"` when it rang out) stanza, and the engine does not always turn either into a
+     * state change, so without this the call would ring until the caller's own timeout. An answered call is left to the engine.
+     */
+    _peerEnded = (tag, reason) => {
+        if (this.#state === CallState.Active)
+            return;
+        this._forceEnd(tag === "terminate" && reason === "timeout" ? "no_answer" : "remote_end");
+    };
+    /** @internal — engine event 11: the callee declined. */
+    _peerRejected = () => {
+        this._peerEnded("reject");
+    };
     /** @internal */
     _emitAudio = (pcm) => { this.emit("audio", pcm); };
     /** @internal */
@@ -256,6 +270,11 @@ export class VoipClient {
         catch { }
         this.#sock.ws.on("CB:call", (node) => {
             this.#signaling.processIncomingCall(node, this.#engine, this.#activeCall?.callId ?? "");
+            const child = Array.isArray(node.content) ? node.content[0] : null;
+            const callId = child?.attrs?.["call-id"] ?? child?.attrs?.call_id;
+            if ((child?.tag === "reject" || child?.tag === "terminate") && callId && callId === this.#activeCall?.callId) {
+                this.#activeCall._peerEnded(child.tag, child.attrs.reason);
+            }
         });
         this.#sock.ws.on("CB:receipt", (node) => {
             if (!isCallReceiptNode(node))
@@ -354,6 +373,9 @@ export class VoipClient {
         }
         else if (eventType === 2) {
             this.#activeCall?._forceEnd("remote_end");
+        }
+        else if (eventType === 11) {
+            this.#activeCall?._peerRejected();
         }
     };
     #handleAudioCaptureInit = (config) => {

@@ -29,6 +29,14 @@ export declare class ActiveCall extends EventEmitter {
     waitForEnd: () => Promise<string>;
     /** @internal — called by VoipClient on WASM call-state change */
     _updateState: (state: number) => void;
+    /**
+     * @internal — the callee's side ended a call that was never answered. WhatsApp tells us with a `reject` (declined)
+     * or a `terminate` (`reason="timeout"` when it rang out) stanza, and the engine does not always turn either into a
+     * state change, so without this the call would ring until the caller's own timeout. An answered call is left to the engine.
+     */
+    _peerEnded: (tag: string, reason?: string) => void;
+    /** @internal — engine event 11: the callee declined. */
+    _peerRejected: () => void;
     /** @internal */
     _emitAudio: (pcm: Float32Array) => void;
     /** @internal */
