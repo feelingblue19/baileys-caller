@@ -37,6 +37,12 @@ export declare class ActiveCall extends EventEmitter {
      * that call never rings.
      */
     _peerEnded: (tag: string, reason?: string) => void;
+    /**
+     * @internal — notes why the callee's side is ending an unanswered call, before its stanza reaches the engine. The
+     * engine may react to that stanza with a state change that ends the call first, and that change alone says only
+     * "ended"; with the note it reports `no_answer` / `remote_end` like `_peerEnded` would.
+     */
+    _notePeerEnd: (tag: string, reason?: string) => void;
     /** @internal — engine event 11: the callee declined. */
     _peerRejected: () => void;
     /** @internal */

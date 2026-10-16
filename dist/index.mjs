@@ -72,6 +72,8 @@ export class ActiveCall extends EventEmitter {
     #endPromise;
     #endTimer = null;
     #ended = false;
+    /** Why the callee's side ended the call, noted from its stanza before the engine sees it; null until then. */
+    #peerEndReason = null;
     /** @internal mirrors the source path for the audio feeder */
     _audioSource = "silence";
     constructor(callId, engine, durationMs) {
@@ -111,7 +113,7 @@ export class ActiveCall extends EventEmitter {
         else if (state === CallState.Active)
             this.emit("connected");
         else if (state === CallState.Idle || state === CallState.Ending) {
-            this._forceEnd("ended");
+            this._forceEnd(this.#peerEndReason ?? "ended");
         }
     };
     /**
@@ -124,7 +126,17 @@ export class ActiveCall extends EventEmitter {
     _peerEnded = (tag, reason) => {
         if (this.#state === CallState.Active)
             return;
-        this.end(tag === "terminate" && reason === "timeout" ? "no_answer" : "remote_end");
+        this.end(peerEndReason(tag, reason));
+    };
+    /**
+     * @internal — notes why the callee's side is ending an unanswered call, before its stanza reaches the engine. The
+     * engine may react to that stanza with a state change that ends the call first, and that change alone says only
+     * "ended"; with the note it reports `no_answer` / `remote_end` like `_peerEnded` would.
+     */
+    _notePeerEnd = (tag, reason) => {
+        if (this.#state === CallState.Active)
+            return;
+        this.#peerEndReason ??= peerEndReason(tag, reason);
     };
     /** @internal — engine event 11: the callee declined. */
     _peerRejected = () => {
@@ -144,6 +156,10 @@ export class ActiveCall extends EventEmitter {
         this.emit("ended", reason);
         this.#endResolver(reason);
     };
+}
+/** `terminate` with `reason="timeout"` means it rang out; anything else (a `reject`, a busy line) is the callee's doing. */
+function peerEndReason(tag, reason) {
+    return tag === "terminate" && reason === "timeout" ? "no_answer" : "remote_end";
 }
 /** Top-level client. Connects to WhatsApp and lets you place calls. */
 export class VoipClient {
@@ -271,12 +287,16 @@ export class VoipClient {
         }
         catch { }
         this.#sock.ws.on("CB:call", (node) => {
-            this.#signaling.processIncomingCall(node, this.#engine, this.#activeCall?.callId ?? "");
             const child = Array.isArray(node.content) ? node.content[0] : null;
             const callId = child?.attrs?.["call-id"] ?? child?.attrs?.call_id;
-            if ((child?.tag === "reject" || child?.tag === "terminate") && callId && callId === this.#activeCall?.callId) {
-                this.#activeCall._peerEnded(child.tag, child.attrs.reason);
-            }
+            const peerEnd = (child?.tag === "reject" || child?.tag === "terminate") && callId && callId === this.#activeCall?.callId
+                ? this.#activeCall
+                : null;
+            // Noted before the engine sees the stanza: its state change can end the call before we get another chance.
+            peerEnd?._notePeerEnd(child.tag, child.attrs.reason);
+            this.#signaling.processIncomingCall(node, this.#engine, this.#activeCall?.callId ?? "");
+            // When the engine does not end the call on its own, end it here.
+            peerEnd?._peerEnded(child.tag, child.attrs.reason);
         });
         this.#sock.ws.on("CB:receipt", (node) => {
             if (!isCallReceiptNode(node))
