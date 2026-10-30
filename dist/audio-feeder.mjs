@@ -10,6 +10,11 @@ import { spawn } from "node:child_process";
 const LOW_WATERMARK_CHUNKS = 16;
 const MAX_QUEUED_CHUNKS = 1024;
 const DEFAULT_WARMUP_MS = 500;
+/**
+ * Live PCM backlog kept at most (10 x 20 ms). A live producer runs at real time just like the metering loop, so
+ * anything queued beyond a little jitter headroom is pure latency that would never drain.
+ */
+const MAX_LIVE_QUEUED_CHUNKS = 10;
 export class AudioFeeder {
     sampleRate;
     channels;
@@ -49,12 +54,11 @@ export class AudioFeeder {
         merged.set(pcm, this.#pendingF32.length);
         let offset = 0;
         while (merged.length - offset >= chunkSamples) {
-            if (this.#queue.length >= MAX_QUEUED_CHUNKS) {
-                // The uplink is not draining (capture stalled); drop the backlog rather
-                // than grow without bound. Live audio is worthless once it is late.
+            if (this.#queue.length >= MAX_LIVE_QUEUED_CHUNKS) {
+                // Live audio is worthless once it is late: the oldest chunk goes, so the
+                // backlog (and with it the latency) stays bounded while the newest audio plays.
+                this.#queue.shift();
                 this.droppedChunks += 1;
-                offset = merged.length;
-                break;
             }
             this.#queue.push(merged.slice(offset, offset + chunkSamples));
             offset += chunkSamples;

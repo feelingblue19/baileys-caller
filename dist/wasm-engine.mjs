@@ -19,6 +19,10 @@ const __dirname = path.dirname(__filename);
 const CALL_WASM_AB_PROPS_JSON = process.env.CALL_WASM_AB_PROPS_JSON ?? "";
 const PTHREAD_POOL_SIZE = 20;
 const VOIP_READY_TIMEOUT_MS = 15_000;
+/** Rate of the PCM `requestAudioDataFromWasmVoip` hands back (mono f32). */
+const PLAYBACK_SAMPLE_RATE = 16000;
+/** How far the playback pull may fall behind real time before it resyncs rather than catching up. */
+const PLAYBACK_MAX_CATCHUP_MS = 100;
 const parseJsonObjectEnv = (raw) => {
     if (!raw)
         return {};
@@ -583,32 +587,48 @@ export class WasmEngine {
         }
         if (!this.#audioPlaybackBuffer || this.#audioPlaybackBuffer <= 0)
             return;
-        this.#audioPlaybackLoopInterval = setInterval(() => {
+        // One pull per 20 ms chunk of real time. Pulling faster than real time makes the WASM jitter buffer invent audio
+        // (concealment) to fill the extra chunks, and the surplus piles up downstream as latency. Scheduled against an
+        // absolute clock so timer lateness does not drift the rate either.
+        const chunkMs = (framesPerChunk / PLAYBACK_SAMPLE_RATE) * 1000;
+        let nextPullAtMs = Date.now();
+        const tick = () => {
+            this.#audioPlaybackLoopInterval = null;
             if (!this.#isPlaybackActive || !this.#instance || !this.#initialized) {
                 this.#stopAudioPlaybackLoop();
                 return;
             }
-            try {
-                this.#instance.requestAudioDataFromWasmVoip(this.#audioPlaybackBuffer, bufferSize);
-                const heapF32 = this.#instance.GROWABLE_HEAP_F32?.();
-                if (!heapF32)
-                    return;
-                const index = Math.floor(this.#audioPlaybackBuffer / 4);
-                const numFloats = Math.floor(bufferSize / 4);
-                if (index < 0 || index + numFloats > heapF32.length)
-                    return;
-                const audioData = new Float32Array(heapF32.buffer, heapF32.byteOffset + index * 4, numFloats);
-                const hasNonZero = audioData.some((s) => Math.abs(s) > 0.0001);
-                if (hasNonZero)
-                    this.#config.callbacks?.onAudioPlaybackData?.(audioData);
-            }
-            catch { }
-        }, 16);
+            this.#pullPlaybackChunk(bufferSize);
+            nextPullAtMs += chunkMs;
+            const now = Date.now();
+            // After a long event-loop stall, resync instead of bursting through the missed chunks.
+            if (now - nextPullAtMs > PLAYBACK_MAX_CATCHUP_MS)
+                nextPullAtMs = now;
+            this.#audioPlaybackLoopInterval = setTimeout(tick, Math.max(0, nextPullAtMs - now));
+        };
+        this.#audioPlaybackLoopInterval = setTimeout(tick, 0);
+    };
+    #pullPlaybackChunk = (bufferSize) => {
+        try {
+            this.#instance.requestAudioDataFromWasmVoip(this.#audioPlaybackBuffer, bufferSize);
+            const heapF32 = this.#instance.GROWABLE_HEAP_F32?.();
+            if (!heapF32)
+                return;
+            const index = Math.floor(this.#audioPlaybackBuffer / 4);
+            const numFloats = Math.floor(bufferSize / 4);
+            if (index < 0 || index + numFloats > heapF32.length)
+                return;
+            const audioData = new Float32Array(heapF32.buffer, heapF32.byteOffset + index * 4, numFloats);
+            const hasNonZero = audioData.some((s) => Math.abs(s) > 0.0001);
+            if (hasNonZero)
+                this.#config.callbacks?.onAudioPlaybackData?.(audioData);
+        }
+        catch { }
     };
     #stopAudioPlaybackLoop = () => {
         this.#isPlaybackActive = false;
         if (this.#audioPlaybackLoopInterval) {
-            clearInterval(this.#audioPlaybackLoopInterval);
+            clearTimeout(this.#audioPlaybackLoopInterval);
             this.#audioPlaybackLoopInterval = null;
         }
         if (this.#audioPlaybackBuffer && this.#audioPlaybackBuffer > 0) {
