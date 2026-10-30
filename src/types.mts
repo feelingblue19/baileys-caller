@@ -37,6 +37,8 @@ export type CallEvents = {
 export type VoipSdkConfig = {
   /** Path to a Baileys multi-file auth state directory. */
   authDir: string;
+  /** Called with the raw Linked-Devices QR payload instead of printing it. */
+  onQr?: (qr: string) => void;
 };
 
 /** Mirrors the WhatsApp WASM `CallState` enum. */
